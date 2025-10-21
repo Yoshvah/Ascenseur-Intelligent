@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
 import { Search, Clock, ChefHat, ChevronDown } from 'lucide-react';
+import DRecipes from './DRecipes';
 
 export default function Recipes() {
   const [searchTerm, setSearchTerm] = useState('');
+  const [selectedRecipe, setSelectedRecipe] = useState(null);
 
   const recipes = [
     {
@@ -47,6 +49,12 @@ export default function Recipes() {
     recipe.title.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
+  // Si une recette est sélectionnée, afficher DRecipes
+  if (selectedRecipe) {
+    return <DRecipes recipe={selectedRecipe} onBack={() => setSelectedRecipe(null)} />;
+  }
+
+  // Sinon, afficher la liste des recettes
   return (
     <div className="max-w-7xl mx-auto px-6 py-8">
       {/* Page Title */}
@@ -136,7 +144,10 @@ export default function Recipes() {
               </div>
 
               {/* CTA Button */}
-              <button className="w-full py-3 bg-green-500 hover:bg-green-600 text-white font-medium rounded-lg transition-colors">
+              <button 
+                onClick={() => setSelectedRecipe(recipe)}
+                className="w-full py-3 bg-green-500 hover:bg-green-600 text-white font-medium rounded-lg transition-colors"
+              >
                 Voir la recette
               </button>
             </div>

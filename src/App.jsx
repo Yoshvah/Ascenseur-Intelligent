@@ -1,10 +1,12 @@
 import { useState } from "react";
-import { Bell, Settings, BarChart3 } from "lucide-react";
+import { Bell, Settings as SettingsIcon, BarChart3 } from "lucide-react";
 import './index.css'
-import Dashboard from "./pages/Dashboard";
 import Inventory from "./pages/Inventory";
-// import AddProduct from "./pages/AddProduct";
+import Recipes from "./pages/Recipes";
 import ShoppingList from "./pages/ShoppingList";
+import Statistics from "./pages/Statistics";
+import Notifications from "./pages/Notifications";
+import Settings from "./pages/Settings";
 
 function App() {
   const [page, setPage] = useState("inventory");
@@ -13,12 +15,16 @@ function App() {
     switch (page) {
       case "inventory":
         return <Inventory />;
-      // case "add":
-      //   return <AddProduct />;
+      case "recipes":
+        return <Recipes />;
       case "shopping":
         return <ShoppingList />;
-      case "dashboard":
-        return <Dashboard />;
+      case "statistics":
+        return <Statistics />;
+      case "notifications":
+        return <Notifications />;
+      case "settings":
+        return <Settings />;
       default:
         return <Inventory />;
     }
@@ -42,9 +48,9 @@ function App() {
                   Inventaire
                 </button>
                 <button
-                  onClick={() => setPage("dashboard")}
+                  onClick={() => setPage("recipes")}
                   className={`text-base font-medium ${
-                    page === "dashboard" ? "text-green-500" : "text-gray-600 hover:text-gray-900"
+                    page === "recipes" ? "text-green-500" : "text-gray-600 hover:text-gray-900"
                   }`}
                 >
                   Recettes
@@ -60,13 +66,28 @@ function App() {
               </nav>
             </div>
             <div className="flex items-center gap-3">
-              <button className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg">
+              <button 
+                onClick={() => setPage("notifications")}
+                className={`p-2 rounded-lg ${
+                  page === "notifications" ? "bg-green-100 text-green-600" : "text-gray-600 hover:bg-gray-100"
+                }`}
+              >
                 <Bell size={20} />
               </button>
-              <button className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg">
-                <Settings size={20} />
+              <button 
+                onClick={() => setPage("settings")}
+                className={`p-2 rounded-lg ${
+                  page === "settings" ? "bg-green-100 text-green-600" : "text-gray-600 hover:bg-gray-100"
+                }`}
+              >
+                <SettingsIcon size={20} />
               </button>
-              <button className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg">
+              <button 
+                onClick={() => setPage("statistics")}
+                className={`p-2 rounded-lg ${
+                  page === "statistics" ? "bg-green-100 text-green-600" : "text-gray-600 hover:bg-gray-100"
+                }`}
+              >
                 <BarChart3 size={20} />
               </button>
             </div>

@@ -1,7 +1,7 @@
 export default function Dashboard() {
   return (
     <div className="space-y-8">
-      <h2 className="text-3xl font-bold text-gray-800">Mon Frigo</h2>
+      <h2 className="text-3xl font-bold text-gray-800">M Frigo</h2>
 
       {/* Alertes Urgentes */}
       <section>
