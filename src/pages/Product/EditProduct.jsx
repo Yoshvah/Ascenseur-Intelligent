@@ -15,11 +15,20 @@ export default function EditProduct({ productId, onBack }) {
     if (productId) {
       const product = getProduct(productId);
       if (product) {
+        // Convert ISO date to yyyy-MM-dd format
+        const formatDateForInput = (dateString) => {
+          const date = new Date(dateString);
+          const year = date.getFullYear();
+          const month = String(date.getMonth() + 1).padStart(2, '0');
+          const day = String(date.getDate()).padStart(2, '0');
+          return `${year}-${month}-${day}`;
+        };
+
         setForm({
           name: product.name,
           category: product.category,
           quantity: product.quantity.toString(),
-          expiration: product.expiration,
+          expiration: formatDateForInput(product.expiration),
         });
       }
     }
