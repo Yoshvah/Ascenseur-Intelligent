@@ -114,6 +114,38 @@ export const ProductProvider = ({ children }) => {
     }
   };
 
+  const updateQ = async (id, newQuantity) => {
+  try {
+    // Récupérer le produit actuel pour conserver ses propriétés
+    const currentProduct = products.find(p => p.id === id);
+    if (!currentProduct) {
+      throw new Error("Produit non trouvé");
+    }
+
+    // Créer un nouvel objet produit avec uniquement la quantité mise à jour
+    const productWithUpdatedQuantity = {
+      ...currentProduct,
+      quantity: newQuantity,
+      status: calculateStatus(currentProduct.expiration, newQuantity)
+    };
+
+    // Envoyer la mise à jour au backend
+    const response = await fetch(`${API_URL}/products/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(productWithUpdatedQuantity)
+    });
+
+    const updated = await response.json();
+
+    // Mettre à jour le state local
+    setProducts(products.map(p => p.id === id ? updated : p));
+
+  } catch (error) {
+    console.error('Erreur lors de la mise à jour de la quantité:', error);
+  }
+};
+
   const deleteProduct = async (id) => {
     try {
       await fetch(`${API_URL}/products/${id}`, { method: 'DELETE' });

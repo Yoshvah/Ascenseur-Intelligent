@@ -27,7 +27,7 @@ export default function Inventory({ onAddProduct, onEditProduct }) {
 
   const categories = ['all', ...new Set(products.map(p => p.category))];
 
- const handleQuantityChange = async (product, change) => {
+const handleQuantity = async (product, change) => {
   const newQuantity = Math.max(0, product.quantity + change);
 
   if (newQuantity === 0) {
@@ -37,13 +37,11 @@ export default function Inventory({ onAddProduct, onEditProduct }) {
     return;
   }
 
-  // Ne mettez à jour que la quantité, pas la date de péremption
-  await updateProduct(product.id, {
-    ...product,
-    quantity: newQuantity,
-    // Ne pas inclure expiration ici, ou s'assurer qu'elle reste la même
-  });
+  // Assurez-vous d'appeler la bonne fonction ici
+  await updateQ(product.id, newQuantity);
 };
+
+
 
   const getFilteredAndSortedProducts = () => {
     let filtered = products.filter(p => {
@@ -262,14 +260,14 @@ export default function Inventory({ onAddProduct, onEditProduct }) {
                               <Trash2 size={16} />
                             </button>
                             <button
-                              onClick={() => handleQuantityChange(product, -1)}
+                              onClick={() => handleQuantity(product, -1)}
                               className="p-1 text-gray-600 hover:bg-gray-100 rounded transition-colors"
                               title="Diminuer la quantité"
                             >
                               <Minus size={16} />
                             </button>
                             <button
-                              onClick={() => handleQuantityChange(product, 1)}
+                              onClick={() => handleQuantity(product, 1)}
                               className="p-1 text-gray-600 hover:bg-gray-100 rounded transition-colors"
                               title="Augmenter la quantité"
                             >
