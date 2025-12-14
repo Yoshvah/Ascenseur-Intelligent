@@ -247,6 +247,36 @@ app.get('/api/elevator/:id?', (req, res) => {
   }
 });
 
+// Dans votre server.js, ajoutez cette route:
+
+// Get all active requests
+app.get('/api/requests', (req, res) => {
+  try {
+    // Si vous utilisez la version simple sans database
+    const activeRequests = elevatorSystem.getPendingCalls ? elevatorSystem.getPendingCalls() : [];
+    
+    res.json({
+      success: true,
+      requests: activeRequests.map(call => ({
+        id: call.id || Date.now(),
+        floor: call.floor,
+        direction: call.direction,
+        passengers: call.passengers || 1,
+        destination: call.destination,
+        status: call.status || 'pending',
+        isDestination: false, // Vous pouvez ajuster cette logique
+        waitingTime: Date.now() - (call.timestamp || Date.now())
+      }))
+    });
+  } catch (error) {
+    console.error('Error getting requests:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error getting requests' 
+    });
+  }
+});
+
 // Nouvel appel avec gestion des passagers
 app.post('/api/call', (req, res) => {
   try {
