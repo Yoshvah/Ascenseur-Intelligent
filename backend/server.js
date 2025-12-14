@@ -50,36 +50,71 @@ class ElevatorSystem {
   }
 
   // Nouvelle fonction: ajouter une destination
+// ...existing code...
   addDestination(elevatorId, floor, isDestination = false, passengers = 0, destination = null) {
     const elevator = this.elevators.get(elevatorId);
-    
+    if (!elevator) return null;
+
     const dest = {
-      floor: parseInt(floor),
+      floor: parseInt(floor, 10),
       isDestination,
-      passengers: parseInt(passengers),
-      destination: destination !== null ? parseInt(destination) : null,
+      passengers: parseInt(passengers, 10) || 0,
+      destination: destination !== null ? parseInt(destination, 10) : null,
       timestamp: Date.now(),
       id: Date.now() + Math.random()
     };
-    
-    elevator.destinations.push(dest);
-    
-    // Trier selon la direction
-    if (elevator.direction === 'up' || elevator.direction === 'idle') {
-      elevator.destinations.sort((a, b) => a.floor - b.floor);
-    } else {
-      elevator.destinations.sort((a, b) => b.floor - a.floor);
+
+    // Si pas de destinations existantes -> push et démarrer si idle
+    if (elevator.destinations.length === 0) {
+      elevator.destinations.push(dest);
+      if (elevator.direction === 'idle') {
+        const nextDest = elevator.destinations[0];
+        elevator.direction = nextDest.floor > elevator.currentFloor ? 'up' : 'down';
+        this.processElevatorMovement(elevatorId);
+      }
+      return dest;
     }
-    
-    // Démarre le mouvement si idle
+
+    // Fonction utilitaire : calcule la distance totale parcourue si on parcourt la séquence depuis currentFloor
+    const totalRouteDistance = (startFloor, seq) => {
+      let dist = 0;
+      let curr = startFloor;
+      for (let s of seq) {
+        dist += Math.abs(curr - s.floor);
+        curr = s.floor;
+      }
+      return dist;
+    };
+
+    // Tester toutes les positions d'insertion et choisir la meilleure (coût minimal)
+    const currentFloor = elevator.currentFloor;
+    const baseSeq = elevator.destinations.slice();
+    let bestSeq = null;
+    let bestCost = Infinity;
+
+    for (let i = 0; i <= baseSeq.length; i++) {
+      const testSeq = baseSeq.slice();
+      testSeq.splice(i, 0, dest);
+      const cost = totalRouteDistance(currentFloor, testSeq);
+      if (cost < bestCost) {
+        bestCost = cost;
+        bestSeq = testSeq;
+      }
+    }
+
+    // Appliquer la meilleure séquence trouvée
+    elevator.destinations = bestSeq;
+
+    // Si l'ascenseur était idle, démarrer le mouvement
     if (elevator.direction === 'idle' && elevator.destinations.length > 0) {
       const nextDest = elevator.destinations[0];
       elevator.direction = nextDest.floor > elevator.currentFloor ? 'up' : 'down';
       this.processElevatorMovement(elevatorId);
     }
-    
+
     return dest;
   }
+// ...existing code...
 
   async processElevatorMovement(elevatorId) {
     const elevator = this.elevators.get(elevatorId);
