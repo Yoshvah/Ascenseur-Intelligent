@@ -1,10 +1,16 @@
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
+const {Pool} = require('pg');
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || 'postgresql://user:password@localhost:5432/elevator_db',
+});
+
 
 class ElevatorSystem {
   constructor() {
@@ -30,27 +36,48 @@ class ElevatorSystem {
   // Nouvelle fonction: ajouter un passager avec destination
   addPassenger(elevatorId, pickupFloor, destinationFloor, passengerCount = 1) {
     const elevator = this.elevators.get(elevatorId);
-    
     if (!elevator) return false;
-    
-    // Ajouter à la file d'attente
+
+    const pickupId = Date.now() + Math.random();
+    const dropId = Date.now() + Math.random() + 1;
+
+    const pickupDest = {
+      floor: parseInt(pickupFloor, 10),
+      isDestination: false,
+      passengers: parseInt(passengerCount, 10) || 0,
+      destination: parseInt(destinationFloor, 10),
+      timestamp: Date.now(),
+      id: pickupId,
+      pairId: dropId // lien vers la drop
+    };
+
+    const dropDest = {
+      floor: parseInt(destinationFloor, 10),
+      isDestination: true,
+      passengers: parseInt(passengerCount, 10) || 0,
+      destination: null,
+      timestamp: Date.now(),
+      id: dropId,
+      pairId: pickupId // lien vers la pickup
+    };
+
+    // Ajouter à la file d'attente logique
     elevator.passengerQueue.push({
       pickupFloor,
       destinationFloor,
       passengerCount,
-      status: 'waiting', // waiting, onboard, completed
-      id: Date.now()
+      status: 'waiting',
+      id: pickupId
     });
-    
-    // Ajouter le pickup à destinations
-    this.addDestination(elevatorId, pickupFloor, false, passengerCount, destinationFloor);
-    
+
+    // Inserer pickup + drop en une opération avec contrainte : drop index > pickup index
+    this.insertPairedDestinations(elevatorId, pickupDest, dropDest);
+
     console.log(`📝 Passager ajouté: ${pickupFloor} → ${destinationFloor} (${passengerCount} pers.)`);
     return true;
   }
 
   // Nouvelle fonction: ajouter une destination
-// ...existing code...
   addDestination(elevatorId, floor, isDestination = false, passengers = 0, destination = null) {
     const elevator = this.elevators.get(elevatorId);
     if (!elevator) return null;
@@ -114,7 +141,61 @@ class ElevatorSystem {
 
     return dest;
   }
-// ...existing code...
+
+    // Helper: insérer deux destinations (pickup puis drop) en minimisant la distance totale
+  insertPairedDestinations(elevatorId, pickupDest, dropDest) {
+    const elevator = this.elevators.get(elevatorId);
+    if (!elevator) return null;
+
+    const totalRouteDistance = (startFloor, seq) => {
+      let dist = 0;
+      let curr = startFloor;
+      for (let s of seq) {
+        dist += Math.abs(curr - s.floor);
+        curr = s.floor;
+      }
+      return dist;
+    };
+
+    const baseSeq = elevator.destinations.slice();
+    const startFloor = elevator.currentFloor;
+
+    let bestSeq = null;
+    let bestCost = Infinity;
+
+    // Parcourir toutes les positions i (pickup) et j (drop) avec j > i
+    for (let i = 0; i <= baseSeq.length; i++) {
+      for (let j = i + 1; j <= baseSeq.length + 1; j++) {
+        const testSeq = baseSeq.slice();
+        testSeq.splice(i, 0, pickupDest);
+        // j doit tenir compte que pickup a été inséré (donc position +1 possible)
+        testSeq.splice(j, 0, dropDest);
+        const cost = totalRouteDistance(startFloor, testSeq);
+        if (cost < bestCost) {
+          bestCost = cost;
+          bestSeq = testSeq;
+        }
+      }
+    }
+
+    // Appliquer la meilleure séquence
+    if (bestSeq) {
+      elevator.destinations = bestSeq;
+    } else {
+      // fallback: push à la fin en respectant l'ordre pickup->drop
+      elevator.destinations.push(pickupDest);
+      elevator.destinations.push(dropDest);
+    }
+
+    // Démarrer si idle
+    if (elevator.direction === 'idle' && elevator.destinations.length > 0) {
+      const nextDest = elevator.destinations[0];
+      elevator.direction = nextDest.floor > elevator.currentFloor ? 'up' : 'down';
+      this.processElevatorMovement(elevatorId);
+    }
+
+    return true;
+  }
 
   async processElevatorMovement(elevatorId) {
     const elevator = this.elevators.get(elevatorId);
@@ -183,8 +264,12 @@ class ElevatorSystem {
         elevator.currentPassengers + arrival.passengers
       );
       
-      // Ajouter la destination des nouveaux passagers
-      this.addDestination(elevatorId, arrival.destination, true, arrival.passengers);
+      // IMPORTANT: n'ajouter la drop QUE SI elle n'est pas déjà planifiée
+      const dropAlreadyPlanned = elevator.destinations.some(d => d.isDestination && d.floor === arrival.destination && d.pairId === arrival.id);
+      if (!dropAlreadyPlanned) {
+        // cas legacy : ajouter si nécessaire
+        this.addDestination(elevatorId, arrival.destination, true, arrival.passengers);
+      }
     }
     
     console.log(`📊 Occupation: ${elevator.currentPassengers}/${elevator.maxCapacity}`);
