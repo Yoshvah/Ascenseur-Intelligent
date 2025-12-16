@@ -182,6 +182,45 @@ async function markRequestServed(requestId) {
   );
 }
 
+// NEW: Helper function to clean up completed destinations
+async function markDestinationCompleted(elevatorId, floor, isDestination) {
+  await pool.query(
+    `UPDATE destinations 
+     SET completed_at = now() 
+     WHERE elevator_id = $1 
+       AND floor = $2 
+       AND is_destination = $3 
+       AND completed_at IS NULL`,
+    [elevatorId, floor, isDestination]
+  );
+}
+
+// NEW: Clean up completed requests
+async function cleanupCompletedRequests() {
+  try {
+    const result = await pool.query(`
+      UPDATE requests r
+      SET status = 'served', updated_at = now()
+      WHERE r.status IN ('pending', 'assigned')
+        AND NOT EXISTS (
+          SELECT 1 FROM passengers p 
+          WHERE p.request_id = r.id 
+          AND p.status != 'completed'
+        )
+      RETURNING id;
+    `);
+    
+    if (result.rowCount > 0) {
+      console.log(`✅ ${result.rowCount} requête(s) marquée(s) comme servie(s)`);
+    }
+    
+    return result.rows;
+  } catch (error) {
+    console.error('Error cleaning up completed requests:', error);
+    return [];
+  }
+}
+
 class ElevatorSystem {
   constructor() {
     this.elevators = new Map();
@@ -198,7 +237,7 @@ class ElevatorSystem {
       currentPassengers: 0,
       isDoorOpen: false,
       destinations: [],
-      passengerQueue: [] // Nouveau: file d'attente des passagers avec destinations
+      passengerQueue: []
     });
     console.log('🚀 Système ascenseur initialisé');
 
@@ -209,14 +248,24 @@ class ElevatorSystem {
     recordElevatorStatusChange(1, elevator.status, { currentFloor: elevator.currentFloor }).catch(() => {});
   }
 
-  // Nouvelle fonction: ajouter un passager avec destination
   async addPassenger(elevatorId, pickupFloor, destinationFloor, passengerCount = 1) {
     const elevator = this.elevators.get(elevatorId);
     if (!elevator) return false;
 
     // create request + passenger rows
-    const req = await createRequest({ floor: pickupFloor, direction: destinationFloor > pickupFloor ? 'up' : 'down', passengers: passengerCount, destination_floor: destinationFloor });
-    const passengerRow = await createPassenger({ request_id: req.id, elevator_id: elevatorId, pickup_floor: pickupFloor, destination_floor: destinationFloor, count: passengerCount });
+    const req = await createRequest({ 
+      floor: pickupFloor, 
+      direction: destinationFloor > pickupFloor ? 'up' : 'down', 
+      passengers: passengerCount, 
+      destination_floor: destinationFloor 
+    });
+    const passengerRow = await createPassenger({ 
+      request_id: req.id, 
+      elevator_id: elevatorId, 
+      pickup_floor: pickupFloor, 
+      destination_floor: destinationFloor, 
+      count: passengerCount 
+    });
 
     const pickupId = Date.now() + Math.random();
     const dropId = Date.now() + Math.random() + 1;
@@ -228,7 +277,9 @@ class ElevatorSystem {
       destination: parseInt(destinationFloor, 10),
       timestamp: Date.now(),
       id: pickupId,
-      pairId: dropId // lien vers la drop
+      pairId: dropId,
+      requestId: req.id,
+      passengerId: passengerRow.id
     };
 
     const dropDest = {
@@ -238,12 +289,27 @@ class ElevatorSystem {
       destination: null,
       timestamp: Date.now(),
       id: dropId,
-      pairId: pickupId // lien vers la pickup
+      pairId: pickupId,
+      requestId: req.id,
+      passengerId: passengerRow.id
     };
 
-    // enregistrer destinations en DB (basic append order — optimisation d'insertion est encore en mémoire)
-    await createDestination({ elevator_id: elevatorId, floor: pickupDest.floor, is_destination: false, expected_passengers: pickupDest.passengers, pair_passenger_id: passengerRow.id }).catch(() => {});
-    await createDestination({ elevator_id: elevatorId, floor: dropDest.floor, is_destination: true, expected_passengers: dropDest.passengers, pair_passenger_id: passengerRow.id }).catch(() => {});
+    // enregistrer destinations en DB
+    await createDestination({ 
+      elevator_id: elevatorId, 
+      floor: pickupDest.floor, 
+      is_destination: false, 
+      expected_passengers: pickupDest.passengers, 
+      pair_passenger_id: passengerRow.id 
+    }).catch(() => {});
+    
+    await createDestination({ 
+      elevator_id: elevatorId, 
+      floor: dropDest.floor, 
+      is_destination: true, 
+      expected_passengers: dropDest.passengers, 
+      pair_passenger_id: passengerRow.id 
+    }).catch(() => {});
 
     // Ajouter à la file d'attente logique
     elevator.passengerQueue.push({
@@ -251,19 +317,25 @@ class ElevatorSystem {
       destinationFloor,
       passengerCount,
       status: 'waiting',
-      id: passengerRow.id
+      id: passengerRow.id,
+      requestId: req.id
     });
 
     // Inserer pickup + drop en une opération avec contrainte : drop index > pickup index
     this.insertPairedDestinations(elevatorId, pickupDest, dropDest);
 
     console.log(`📝 Passager ajouté: ${pickupFloor} → ${destinationFloor} (${passengerCount} pers.)`);
-    logEvent(elevatorId, 'passenger_added', { request: req, passenger: passengerRow }).catch(() => {});
+    logEvent(elevatorId, 'passenger_added', { 
+      request: req, 
+      passenger: passengerRow,
+      pickupFloor,
+      destinationFloor 
+    }).catch(() => {});
+    
     await ensureElevatorRow(elevator).catch(() => {});
     return true;
   }
 
-  // Nouvelle fonction: ajouter une destination
   addDestination(elevatorId, floor, isDestination = false, passengers = 0, destination = null) {
     const elevator = this.elevators.get(elevatorId);
     if (!elevator) return null;
@@ -277,7 +349,6 @@ class ElevatorSystem {
       id: Date.now() + Math.random()
     };
 
-    // Si pas de destinations existantes -> push et démarrer si idle
     if (elevator.destinations.length === 0) {
       elevator.destinations.push(dest);
       if (elevator.direction === 'idle') {
@@ -288,7 +359,6 @@ class ElevatorSystem {
       return dest;
     }
 
-    // Fonction utilitaire : calcule la distance totale parcourue si on parcourt la séquence depuis currentFloor
     const totalRouteDistance = (startFloor, seq) => {
       let dist = 0;
       let curr = startFloor;
@@ -299,7 +369,6 @@ class ElevatorSystem {
       return dist;
     };
 
-    // Tester toutes les positions d'insertion et choisir la meilleure (coût minimal)
     const currentFloor = elevator.currentFloor;
     const baseSeq = elevator.destinations.slice();
     let bestSeq = null;
@@ -315,10 +384,8 @@ class ElevatorSystem {
       }
     }
 
-    // Appliquer la meilleure séquence trouvée
     elevator.destinations = bestSeq;
 
-    // Si l'ascenseur était idle, démarrer le mouvement
     if (elevator.direction === 'idle' && elevator.destinations.length > 0) {
       const nextDest = elevator.destinations[0];
       elevator.direction = nextDest.floor > elevator.currentFloor ? 'up' : 'down';
@@ -328,7 +395,6 @@ class ElevatorSystem {
     return dest;
   }
 
-    // Helper: insérer deux destinations (pickup puis drop) en minimisant la distance totale
   insertPairedDestinations(elevatorId, pickupDest, dropDest) {
     const elevator = this.elevators.get(elevatorId);
     if (!elevator) return null;
@@ -349,12 +415,10 @@ class ElevatorSystem {
     let bestSeq = null;
     let bestCost = Infinity;
 
-    // Parcourir toutes les positions i (pickup) et j (drop) avec j > i
     for (let i = 0; i <= baseSeq.length; i++) {
       for (let j = i + 1; j <= baseSeq.length + 1; j++) {
         const testSeq = baseSeq.slice();
         testSeq.splice(i, 0, pickupDest);
-        // j doit tenir compte que pickup a été inséré (donc position +1 possible)
         testSeq.splice(j, 0, dropDest);
         const cost = totalRouteDistance(startFloor, testSeq);
         if (cost < bestCost) {
@@ -364,16 +428,13 @@ class ElevatorSystem {
       }
     }
 
-    // Appliquer la meilleure séquence
     if (bestSeq) {
       elevator.destinations = bestSeq;
     } else {
-      // fallback: push à la fin en respectant l'ordre pickup->drop
       elevator.destinations.push(pickupDest);
       elevator.destinations.push(dropDest);
     }
 
-    // Démarrer si idle
     if (elevator.direction === 'idle' && elevator.destinations.length > 0) {
       const nextDest = elevator.destinations[0];
       elevator.direction = nextDest.floor > elevator.currentFloor ? 'up' : 'down';
@@ -389,20 +450,16 @@ class ElevatorSystem {
     while (elevator.destinations.length > 0) {
       const nextDest = elevator.destinations[0];
       
-      // Mouvement vers la destination
       await this.moveToFloor(elevatorId, nextDest.floor);
-      
-      // Arrivé à destination
       await this.handleArrival(elevatorId, nextDest);
       
-      // Retirer la destination traitée
       elevator.destinations = elevator.destinations.filter(d => d.id !== nextDest.id);
-      
-      // Mettre à jour la file des passagers
       this.updatePassengerQueue(elevatorId, nextDest);
+      
+      // NEW: Clean up completed requests after each arrival
+      await cleanupCompletedRequests();
     }
     
-        // Plus de destinations → idle
     elevator.direction = 'idle';
     console.log(`⏹️ Ascenseur ${elevatorId} est maintenant IDLE`);
     logEvent(elevatorId, 'idle', { currentFloor: elevator.currentFloor }).catch(() => {});
@@ -419,17 +476,15 @@ class ElevatorSystem {
     recordElevatorStatusChange(elevatorId, 'moving', { from: currentFloor, to: targetFloor }).catch(() => {});
     await ensureElevatorRow(elevator).catch(() => {});
 
-    // Simulation de mouvement
     let step = currentFloor;
     const increment = targetFloor > currentFloor ? 1 : -1;
     
     while (step !== targetFloor) {
       step += increment;
-      await new Promise(resolve => setTimeout(resolve, 1000)); // 1s par étage
+      await new Promise(resolve => setTimeout(resolve, 1000));
       elevator.currentFloor = step;
       console.log(`📊 Ascenseur ${elevatorId} maintenant à l'étage ${step}`);
 
-      // log floor reached
       logEvent(elevatorId, 'floor_reached', { floor: step }).catch(() => {});
       await pool.query(`UPDATE elevators SET current_floor = $2, updated_at = now() WHERE id = $1`, [elevatorId, step]).catch(() => {});
     }
@@ -444,43 +499,85 @@ class ElevatorSystem {
     console.log(`🎯 Arrivée à l'étage ${arrival.floor}`);
     logEvent(elevatorId, 'arrival', { floor: arrival.floor, arrival }).catch(() => {});
 
+    // Marquer la destination comme complétée dans la DB
+    await markDestinationCompleted(elevatorId, arrival.floor, arrival.isDestination).catch(() => {});
+
     // Ouvrir les portes
     elevator.isDoorOpen = true;
     await pool.query(`UPDATE elevators SET is_door_open = true WHERE id = $1`, [elevatorId]).catch(() => {});
     console.log(`🚪 Portes ouvertes à l'étage ${arrival.floor}`);
     
-    // Attendre 2 secondes pour l'embarquement/débarquement
     await new Promise(resolve => setTimeout(resolve, 2000));
     
-    // Si c'est une DESTINATION (débarquement)
     if (arrival.isDestination) {
       console.log(`👋 ${arrival.passengers} passager(s) descendent`);
       elevator.currentPassengers = Math.max(0, elevator.currentPassengers - arrival.passengers);
-      // marquer passagers complétés en DB pour cet étage (simple heuristic: match by destination_floor)
+      
+      // NEW: Get passengers and their request IDs
       const passengersToComplete = await pool.query(
-        `SELECT id FROM passengers WHERE destination_floor = $1 AND status = 'onboard' AND elevator_id = $2`,
+        `SELECT p.id, p.request_id FROM passengers p 
+         WHERE p.destination_floor = $1 
+           AND p.status = 'onboard' 
+           AND p.elevator_id = $2`,
         [arrival.floor, elevatorId]
       ).catch(() => ({ rows: [] }));
-      for (const p of (passengersToComplete.rows || [])) {
+      
+      for (const p of passengersToComplete.rows) {
         await markPassengerCompleted(p.id).catch(() => {});
-        logEvent(elevatorId, 'passenger_alighted', { passengerId: p.id, floor: arrival.floor }).catch(() => {});
+        
+        // NEW: Check if all passengers from this request have completed
+        if (p.request_id) {
+          const remainingPassengers = await pool.query(
+            `SELECT COUNT(*) FROM passengers 
+             WHERE request_id = $1 AND status != 'completed'`,
+            [p.request_id]
+          ).catch(() => ({ rows: [{ count: '0' }] }));
+          
+          if (parseInt(remainingPassengers.rows[0].count) === 0) {
+            await markRequestServed(p.request_id).catch(() => {});
+            console.log(`✅ Tous les passagers de la requête ${p.request_id} sont arrivés`);
+          }
+        }
+        
+        logEvent(elevatorId, 'passenger_alighted', { 
+          passengerId: p.id, 
+          floor: arrival.floor,
+          requestId: p.request_id 
+        }).catch(() => {});
       }
-    }
-    
-    // Si c'est un PICKUP (embarquement)
-    else if (arrival.destination !== null) {
+    } else if (arrival.destination !== null) {
       console.log(`👥 ${arrival.passengers} passager(s) montent, destination: ${arrival.destination}`);
 
-      // trouver waiting passengers at this pickup and assign to this elevator
       const waitingPassengers = await pool.query(
-        `SELECT id FROM passengers WHERE pickup_floor = $1 AND status = 'waiting' ORDER BY requested_at LIMIT $2`,
+        `SELECT id, request_id FROM passengers 
+         WHERE pickup_floor = $1 
+           AND status = 'waiting' 
+         ORDER BY requested_at 
+         LIMIT $2`,
         [arrival.floor, arrival.passengers]
       ).catch(() => ({ rows: [] }));
 
-      for (const p of (waitingPassengers.rows || [])) {
-        await pool.query(`UPDATE passengers SET status='onboard', elevator_id=$2, boarded_at = now() WHERE id = $1`, [p.id, elevatorId]).catch(() => {});
-        await pool.query(`UPDATE requests SET assigned_elevator = $2, updated_at = now() WHERE id = (SELECT request_id FROM passengers WHERE id = $1)`, [p.id, elevatorId]).catch(() => {});
-        logEvent(elevatorId, 'passenger_boarded', { passengerId: p.id, pickupFloor: arrival.floor, destination: arrival.destination }).catch(() => {});
+      for (const p of waitingPassengers.rows) {
+        await pool.query(
+          `UPDATE passengers 
+           SET status='onboard', elevator_id=$2, boarded_at = now() 
+           WHERE id = $1`,
+          [p.id, elevatorId]
+        ).catch(() => {});
+        
+        await pool.query(
+          `UPDATE requests 
+           SET assigned_elevator = $2, status='assigned', updated_at = now() 
+           WHERE id = $1`,
+          [p.request_id, elevatorId]
+        ).catch(() => {});
+        
+        logEvent(elevatorId, 'passenger_boarded', { 
+          passengerId: p.id, 
+          requestId: p.request_id,
+          pickupFloor: arrival.floor, 
+          destination: arrival.destination 
+        }).catch(() => {});
       }
 
       elevator.currentPassengers = Math.min(
@@ -488,15 +585,22 @@ class ElevatorSystem {
         elevator.currentPassengers + arrival.passengers
       );
 
-      // ensure drop destination exists in DB (createDestination)
-      await createDestination({ elevator_id: elevatorId, floor: arrival.destination, is_destination: true, expected_passengers: arrival.passengers }).catch(() => {});
+      await createDestination({ 
+        elevator_id: elevatorId, 
+        floor: arrival.destination, 
+        is_destination: true, 
+        expected_passengers: arrival.passengers 
+      }).catch(() => {});
     }
     
     console.log(`📊 Occupation: ${elevator.currentPassengers}/${elevator.maxCapacity}`);
     
-    // Fermer les portes
     elevator.isDoorOpen = false;
-    await pool.query(`UPDATE elevators SET is_door_open = false, current_passengers = $2 WHERE id = $1`, [elevatorId, elevator.currentPassengers]).catch(() => {});
+    await pool.query(
+      `UPDATE elevators SET is_door_open = false, current_passengers = $2 WHERE id = $1`,
+      [elevatorId, elevator.currentPassengers]
+    ).catch(() => {});
+    
     console.log(`🚪 Portes fermées à l'étage ${arrival.floor}`);
     await new Promise(resolve => setTimeout(resolve, 1000));
     await ensureElevatorRow(elevator).catch(() => {});
@@ -506,15 +610,12 @@ class ElevatorSystem {
     const elevator = this.elevators.get(elevatorId);
 
     if (arrival.isDestination) {
-      // Marquer les passagers comme arrivés en mémoire
       elevator.passengerQueue = elevator.passengerQueue.filter(passenger =>
         passenger.destinationFloor !== arrival.floor
       );
     } else {
-      // Marquer les passagers comme embarqués en mémoire
       elevator.passengerQueue = elevator.passengerQueue.map(passenger => {
         if (passenger.pickupFloor === arrival.floor && passenger.status === 'waiting') {
-          // also update DB passenger status
           markPassengerOnboard(passenger.id).catch(() => {});
           return { ...passenger, status: 'onboard' };
         }
@@ -549,7 +650,6 @@ app.get('/api/elevator/:id?', async (req, res) => {
   const status = elevatorSystem.getElevatorStatus(parseInt(elevatorId));
   
   if (status) {
-    // also enrich with DB elevator row
     const { rows } = await pool.query(`SELECT * FROM elevators WHERE id = $1`, [elevatorId]).catch(() => ({ rows: [] }));
     const dbRow = rows[0] || null;
     res.json({ success: true, elevator: status, db: dbRow });
@@ -558,42 +658,30 @@ app.get('/api/elevator/:id?', async (req, res) => {
   }
 });
 
-
-// Get all active requests
-// app.get('/api/requests', (req, res) => {
-//   try {
-//     // Si vous utilisez la version simple sans database
-//     const activeRequests = elevatorSystem.getPendingCalls ? elevatorSystem.getPendingCalls() : [];
-    
-//     res.json({
-//       success: true,
-//       requests: activeRequests.map(call => ({
-//         id: call.id || Date.now(),
-//         floor: call.floor,
-//         direction: call.direction,
-//         passengers: call.passengers || 1,
-//         destination: call.destination,
-//         status: call.status || 'pending',
-//         isDestination: false, // Vous pouvez ajuster cette logique
-//         waitingTime: Date.now() - (call.timestamp || Date.now())
-//       }))
-//     });
-//   } catch (error) {
-//     console.error('Error getting requests:', error);
-//     res.status(500).json({ 
-//       success: false, 
-//       message: 'Error getting requests' 
-//     });
-//   }
-// });
-
-// Get requests from DB
+// Get only pending/assigned requests (not served)
 app.get('/api/requests', async (req, res) => {
   try {
-    const { rows } = await pool.query(`SELECT * FROM requests ORDER BY created_at DESC LIMIT 100`);
+    const { rows } = await pool.query(
+      `SELECT * FROM requests 
+       WHERE status IN ('pending', 'assigned') 
+       ORDER BY created_at DESC LIMIT 100`
+    );
     res.json({ success: true, requests: rows });
   } catch (error) {
     console.error('Error getting requests:', error);
+    res.status(500).json({ success: false, message: 'Error getting requests' });
+  }
+});
+
+// Get all requests (including served)
+app.get('/api/requests/all', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM requests ORDER BY created_at DESC LIMIT 100`
+    );
+    res.json({ success: true, requests: rows });
+  } catch (error) {
+    console.error('Error getting all requests:', error);
     res.status(500).json({ success: false, message: 'Error getting requests' });
   }
 });
@@ -610,7 +698,6 @@ app.post('/api/call', async (req, res) => {
       });
     }
 
-    // persist request + passenger + schedule
     const success = await elevatorSystem.addPassenger(1, floor, destination, passengers);
 
     if (success) {
@@ -634,7 +721,11 @@ app.post('/api/call', async (req, res) => {
 // Récupérer la file d'attente des passagers (en DB)
 app.get('/api/passengers', async (req, res) => {
   try {
-    const { rows } = await pool.query(`SELECT * FROM passengers ORDER BY requested_at DESC LIMIT 200`);
+    const { rows } = await pool.query(
+      `SELECT * FROM passengers 
+       WHERE status != 'completed' 
+       ORDER BY requested_at DESC LIMIT 200`
+    );
     res.json({ success: true, passengers: rows });
   } catch (error) {
     res.status(500).json({
@@ -655,8 +746,53 @@ app.get('/api/events', async (req, res) => {
   }
 });
 
+// NEW: Clean up completed requests endpoint
+app.post('/api/cleanup', async (req, res) => {
+  try {
+    const cleaned = await cleanupCompletedRequests();
+    res.json({ 
+      success: true, 
+      message: 'Nettoyage terminé',
+      cleaned: cleaned 
+    });
+  } catch (error) {
+    console.error('Error during cleanup:', error);
+    res.status(500).json({ success: false, message: 'Error during cleanup' });
+  }
+});
+
+// NEW: Debug endpoint to see all data
+app.get('/api/debug', async (req, res) => {
+  try {
+    const [requests, passengers, elevator, destinations] = await Promise.all([
+      pool.query(`SELECT * FROM requests ORDER BY created_at DESC`),
+      pool.query(`SELECT * FROM passengers ORDER BY requested_at DESC`),
+      pool.query(`SELECT * FROM elevators WHERE id = 1`),
+      pool.query(`SELECT * FROM destinations ORDER BY created_at DESC`)
+    ]);
+    
+    res.json({
+      success: true,
+      requests: requests.rows,
+      passengers: passengers.rows,
+      elevator: elevator.rows[0],
+      destinations: destinations.rows,
+      activeRequests: requests.rows.filter(r => r.status !== 'served').length,
+      activePassengers: passengers.rows.filter(p => p.status !== 'completed').length
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.post('/api/reset', async (req, res) => {
   await elevatorSystem.initializeElevators();
+  
+  // NEW: Reset all requests and passengers
+  await pool.query(`UPDATE requests SET status = 'cancelled', updated_at = now()`).catch(() => {});
+  await pool.query(`UPDATE passengers SET status = 'cancelled'`).catch(() => {});
+  await pool.query(`DELETE FROM destinations`).catch(() => {});
+  
   await logEvent(1, 'system_reset', { timestamp: Date.now() }).catch(() => {});
   res.json({ success: true, message: 'Système réinitialisé' });
 });
@@ -665,4 +801,13 @@ const PORT = 5001;
 app.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur le port ${PORT}`);
   console.log(`📡 API disponible à http://localhost:${PORT}`);
+  
+  // Schedule periodic cleanup every 30 seconds
+  setInterval(async () => {
+    try {
+      await cleanupCompletedRequests();
+    } catch (error) {
+      console.error('Error in scheduled cleanup:', error);
+    }
+  }, 30000);
 });
